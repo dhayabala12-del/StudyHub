@@ -6,6 +6,7 @@ import {
   AlertCircle, Menu, Trash2, Stamp, Flame, TrendingUp, Award, ThumbsUp, ThumbsDown,
   Download, DatabaseBackup, Target, ClipboardCheck, Clock, ArrowRight
 } from "lucide-react";
+import { supabase } from "./supabaseClient";
 
 const ADMIN_EMAIL = "dhayabala12@gmail.com";
 const ALLOWED_DOMAINS = ["gmail.com", "duvalschools.org"];
@@ -17,24 +18,52 @@ const MODEL = "claude-sonnet-4-6";
 
 const SUBJECT_COLORS = ["#E8B23D", "#4FBDBA", "#C97064", "#8B7FD6", "#6FA97B", "#D68FB0"];
 
-/* ---------------- storage helpers ---------------- */
+/* ---------------- storage helpers (Supabase-backed) ---------------- */
+async function currentUserId() {
+  const { data } = await supabase.auth.getSession();
+  return data?.session?.user?.id || null;
+}
 async function sGet(key, shared) {
   try {
-    const r = await window.storage.get(key, shared);
-    return r ? r.value : null;
-  } catch { return null; }
+    const uid = await currentUserId();
+    if (!shared && !uid) return null;
+    let query = supabase.from("kv_store").select("value").eq("key", key).eq("shared", shared);
+    if (!shared) query = query.eq("owner", uid);
+    const { data, error } = await query.maybeSingle();
+    if (error) throw error;
+    return data ? data.value : null;
+  } catch (e) { console.error(e); return null; }
 }
 async function sSet(key, value, shared) {
-  try { await window.storage.set(key, value, shared); } catch (e) { console.error(e); }
+  try {
+    const uid = await currentUserId();
+    if (!uid) return;
+    const { error } = await supabase
+      .from("kv_store")
+      .upsert(
+        { key, value, shared, owner: uid, updated_at: new Date().toISOString() },
+        { onConflict: "owner,key" }
+      );
+    if (error) throw error;
+  } catch (e) { console.error(e); }
 }
 async function sDelete(key, shared) {
-  try { await window.storage.delete(key, shared); } catch (e) { console.error(e); }
+  try {
+    const uid = await currentUserId();
+    if (!uid) return;
+    await supabase.from("kv_store").delete().eq("key", key).eq("owner", uid);
+  } catch (e) { console.error(e); }
 }
 async function sList(prefix, shared) {
   try {
-    const r = await window.storage.list(prefix, shared);
-    return r ? r.keys : [];
-  } catch { return []; }
+    const uid = await currentUserId();
+    if (!shared && !uid) return [];
+    let query = supabase.from("kv_store").select("key").eq("shared", shared).like("key", `${prefix}%`);
+    if (!shared) query = query.eq("owner", uid);
+    const { data, error } = await query;
+    if (error) throw error;
+    return (data || []).map((r) => r.key);
+  } catch (e) { console.error(e); return []; }
 }
 function safeJSON(str, fallback) {
   if (!str) return fallback;
@@ -210,31 +239,39 @@ function stripFence(text) {
 }
 
 /* ---------------- root ---------------- */
+function userFromSession(session) {
+  const email = session?.user?.email;
+  if (!email) return null;
+  return { email, isAdmin: email.trim().toLowerCase() === ADMIN_EMAIL };
+}
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [booting, setBooting] = useState(true);
 
   useEffect(() => {
-    (async () => {
-      const saved = await sGet("session:user", false);
-      if (saved) setUser(safeJSON(saved, null));
+    let mounted = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setUser(userFromSession(data?.session));
       setBooting(false);
-    })();
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(userFromSession(session));
+    });
+    return () => {
+      mounted = false;
+      listener?.subscription?.unsubscribe();
+    };
   }, []);
 
-  const handleLogin = async (email) => {
-    const isAdmin = email.trim().toLowerCase() === ADMIN_EMAIL;
-    const u = { email: email.trim(), isAdmin };
-    await sSet("session:user", JSON.stringify(u), false);
-    setUser(u);
-  };
   const handleLogout = async () => {
-    await sDelete("session:user", false);
+    await supabase.auth.signOut();
     setUser(null);
   };
 
   if (booting) return <Shell><LoadingSpinner label="Opening your notebook…" /></Shell>;
-  if (!user) return <Shell><LoginScreen onLogin={handleLogin} /></Shell>;
+  if (!user) return <Shell><LoginScreen /></Shell>;
   return <Shell><Workspace user={user} onLogout={handleLogout} /></Shell>;
 }
 
@@ -259,13 +296,49 @@ function LoadingSpinner({ label }) {
 }
 
 /* ---------------- login ---------------- */
-function LoginScreen({ onLogin }) {
+function LoginScreen() {
   const [email, setEmail] = useState("");
   const [touched, setTouched] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [err, setErr] = useState("");
   const valid = isAllowedEmail(email);
   const showError = touched && email.length > 0 && !valid;
 
-  const submit = () => { if (valid) onLogin(email); else setTouched(true); };
+  const submit = async () => {
+    if (!valid) { setTouched(true); return; }
+    setSending(true);
+    setErr("");
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setSending(false);
+    if (error) { setErr(error.message); return; }
+    setSent(true);
+  };
+
+  if (sent) {
+    return (
+      <div className="flex items-center justify-center" style={{ minHeight: "100vh", padding: 20 }}>
+        <div style={{ width: "100%", maxWidth: 420 }}>
+          <div className="flex flex-col items-center" style={{ marginBottom: 32 }}>
+            <div className="brandmark">S</div>
+            <h1 style={{ fontFamily: "var(--font-display)", fontSize: 34, color: "var(--paper)", marginTop: 16, marginBottom: 4 }}>
+              StudyHub
+            </h1>
+          </div>
+          <div className="card" style={{ padding: 28, textAlign: "center" }}>
+            <ShieldCheck size={28} color="var(--accent-verify)" style={{ marginBottom: 10 }} />
+            <p style={{ color: "var(--paper)", fontSize: 15, marginBottom: 6 }}>Check your email</p>
+            <p style={{ color: "var(--ink-soft)", fontSize: 13, lineHeight: 1.5 }}>
+              We sent a sign-in link to <strong>{email}</strong>. Open it on this device to finish logging in.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center justify-center" style={{ minHeight: "100vh", padding: 20 }}>
@@ -299,13 +372,18 @@ function LoginScreen({ onLogin }) {
               <AlertCircle size={13} /> Use your @duvalschools.org email (or a @gmail.com account).
             </div>
           )}
+          {err && (
+            <div className="error-line" style={{ marginTop: 8, marginBottom: 0 }}>
+              <AlertCircle size={13} /> {err}
+            </div>
+          )}
           <button
             className="btn-primary"
             style={{ width: "100%", marginTop: 14 }}
-            disabled={!valid}
+            disabled={!valid || sending}
             onClick={submit}
           >
-            <ShieldCheck size={16} /> Continue
+            <ShieldCheck size={16} /> {sending ? "Sending link…" : "Continue"}
           </button>
           <p style={{ fontSize: 12, color: "var(--ink-soft)", marginTop: 16, lineHeight: 1.5 }}>
             Only your teacher's account can upload
