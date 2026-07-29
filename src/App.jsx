@@ -14,8 +14,6 @@ function isAllowedEmail(email) {
   const parts = email.trim().toLowerCase().split("@");
   return parts.length === 2 && parts[1] && ALLOWED_DOMAINS.includes(parts[1]);
 }
-const MODEL = "claude-sonnet-4-6";
-
 const SUBJECT_COLORS = ["#E8B23D", "#4FBDBA", "#C97064", "#8B7FD6", "#6FA97B", "#D68FB0"];
 
 /* ---------------- storage helpers (Supabase-backed) ---------------- */
@@ -215,19 +213,22 @@ function computeTopicBreakdown(cards, questionsByDiff, progress) {
   });
 }
 
-/* ---------------- Claude API helper ---------------- */
+/* ---------------- Claude API helper (via our own backend proxy) ---------------- */
 async function callClaude({ system, messages, maxTokens = 1000 }) {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: MODEL,
-      max_tokens: maxTokens,
+      maxTokens,
       system,
       messages,
     }),
   });
   const data = await res.json();
+  if (!res.ok) {
+    console.error("Claude proxy error:", data?.error);
+    throw new Error(data?.error || "AI request failed");
+  }
   const text = (data.content || [])
     .filter((b) => b.type === "text")
     .map((b) => b.text)

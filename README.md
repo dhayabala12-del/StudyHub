@@ -11,14 +11,10 @@ Done:
   first use, and set `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` as
   environment variables (locally in `.env.local`, and in Vercel's project
   settings).
-
-Still needed:
-- **Direct `fetch` to `api.anthropic.com`** (in `src/App.jsx`, around the
-  AI chat/practice-test features) — this has no API key attached because
-  Claude's artifact environment injects it automatically. On a real
-  deployment this call must go through your own backend server (e.g. a
-  Vercel serverless function) that holds your Anthropic API key privately
-  (never put an API key in frontend code).
+- **AI features**: `api/chat.js` is a Vercel serverless function that
+  proxies requests to Claude using `ANTHROPIC_API_KEY` (set as a Vercel
+  environment variable, never in frontend code). The frontend now calls
+  `/api/chat` instead of `api.anthropic.com` directly.
 
 ## Local development
 ```bash
