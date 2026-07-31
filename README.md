@@ -12,9 +12,10 @@ Done:
   environment variables (locally in `.env.local`, and in Vercel's project
   settings).
 - **AI features**: `api/chat.js` is a Vercel serverless function that
-  proxies requests to Claude using `ANTHROPIC_API_KEY` (set as a Vercel
-  environment variable, never in frontend code). The frontend now calls
-  `/api/chat` instead of `api.anthropic.com` directly.
+  proxies requests to Google's Gemini API (free tier) using `GEMINI_API_KEY`
+  (set as a Vercel environment variable, never in frontend code). The
+  frontend calls `/api/chat`, which is unaware of which AI provider is
+  behind it — that's contained entirely in this one file.
 
 ## Local development
 ```bash
