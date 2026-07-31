@@ -48,7 +48,10 @@ export default async function handler(req, res) {
 
     const body = {
       contents,
-      generationConfig: { maxOutputTokens: Math.min(Number(maxTokens) || 1000, 4000) },
+      generationConfig: {
+        maxOutputTokens: Math.min(Number(maxTokens) || 1000, 4000),
+        thinkingConfig: { thinkingBudget: 0 },
+      },
     };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
 

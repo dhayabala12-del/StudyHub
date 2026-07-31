@@ -930,7 +930,7 @@ function AddMaterialModal({ onClose, onAdd }) {
       const extracted = await callClaude({
         system: "You transcribe classroom material exactly as written. Output only the extracted text content, preserving headings, lists, and structure. No commentary, no markdown fences.",
         messages: [{ role: "user", content: [block, { type: "text", text: "Extract all text content from this material verbatim." }] }],
-        maxTokens: 1000,
+        maxTokens: 4000,
       });
 
       if (!extracted.trim()) throw new Error("Nothing could be read from this file.");
