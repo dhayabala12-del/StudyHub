@@ -605,11 +605,11 @@ function ModalShell({ onClose, title, children, wide }) {
 
 /* ---------------- backup & restore ---------------- */
 async function exportAllData(subjects) {
-  const data = { exportedAt: Date.now(), subjects, materials: {}, summary: {}, notes: {}, flashcards: {}, practice: {} };
+  const data = { exportedAt: Date.now(), subjects, materials: {}, summaryParts: {}, notesParts: {}, flashcards: {}, practice: {} };
   for (const s of subjects) {
     data.materials[s.id] = safeJSON(await sGet(`materials:${s.id}`, true), []);
-    data.summary[s.id] = (await sGet(`summary:${s.id}`, true)) || "";
-    data.notes[s.id] = (await sGet(`notes:${s.id}`, true)) || "";
+    data.summaryParts[s.id] = safeJSON(await sGet(`summaryParts:${s.id}`, true), {});
+    data.notesParts[s.id] = safeJSON(await sGet(`notesParts:${s.id}`, true), {});
     data.flashcards[s.id] = {};
     data.practice[s.id] = {};
     for (const d of DIFFICULTIES) {
@@ -625,8 +625,8 @@ async function importAllData(data) {
   await sSet("subjects_backup", JSON.stringify(subjects), true);
   for (const s of subjects) {
     if (data.materials?.[s.id]) await sSet(`materials:${s.id}`, JSON.stringify(data.materials[s.id]), true);
-    if (data.summary?.[s.id]) await sSet(`summary:${s.id}`, data.summary[s.id], true);
-    if (data.notes?.[s.id]) await sSet(`notes:${s.id}`, data.notes[s.id], true);
+    if (data.summaryParts?.[s.id]) await sSet(`summaryParts:${s.id}`, JSON.stringify(data.summaryParts[s.id]), true);
+    if (data.notesParts?.[s.id]) await sSet(`notesParts:${s.id}`, JSON.stringify(data.notesParts[s.id]), true);
     for (const d of DIFFICULTIES) {
       const legacyFlashcards = Array.isArray(data.flashcards?.[s.id]) ? data.flashcards[s.id] : null;
       const tieredFlashcards = data.flashcards?.[s.id]?.[d.id];
@@ -821,6 +821,7 @@ function MaterialsTab({ subject, user }) {
   };
   const removeMaterial = async (id) => {
     await saveMaterials(materials.filter((m) => m.id !== id));
+    await cascadeDeleteMaterial(subject.id, id);
     setConfirmDeleteId(null);
   };
 
@@ -993,7 +994,7 @@ async function getMaterialsContext(subjectId) {
   const raw = await sGet(`materials:${subjectId}`, true);
   const list = safeJSON(raw, []);
   if (!list.length) return null;
-  const joined = list.map((m) => `--- ${m.name} ---\n${m.text}`).join("\n\n");
+  const joined = list.map((m) => `--- [material:${m.id}] ${m.name} ---\n${m.text}`).join("\n\n");
   return joined.slice(0, 9000);
 }
 
@@ -1005,41 +1006,85 @@ function LoadingRow({ label }) {
   );
 }
 
+async function cascadeDeleteMaterial(subjectId, materialId) {
+  for (const kind of ["summary", "notes"]) {
+    const raw = await sGet(`${kind}Parts:${subjectId}`, true);
+    const parts = safeJSON(raw, {});
+    if (parts[materialId] !== undefined) {
+      delete parts[materialId];
+      await sSet(`${kind}Parts:${subjectId}`, JSON.stringify(parts), true);
+    }
+  }
+  for (const d of DIFFICULTIES) {
+    const fRaw = await sGet(`flashcards:${subjectId}:${d.id}`, true);
+    const fList = safeJSON(fRaw, []);
+    const fFiltered = fList.filter((c) => c.materialId !== materialId);
+    if (fFiltered.length !== fList.length) {
+      await sSet(`flashcards:${subjectId}:${d.id}`, JSON.stringify(fFiltered), true);
+    }
+    const pRaw = await sGet(`practice:${subjectId}:${d.id}`, true);
+    const pList = safeJSON(pRaw, []);
+    const pFiltered = pList.filter((q) => q.materialId !== materialId);
+    if (pFiltered.length !== pList.length) {
+      await sSet(`practice:${subjectId}:${d.id}`, JSON.stringify(pFiltered), true);
+    }
+  }
+  const mRaw = await sGet(`missedTestQuestions:${subjectId}`, false);
+  const mList = safeJSON(mRaw, []);
+  const mFiltered = mList.filter((q) => q.materialId !== materialId);
+  if (mFiltered.length !== mList.length) {
+    await sSet(`missedTestQuestions:${subjectId}`, JSON.stringify(mFiltered), false);
+  }
+}
+
 /* ---------------- summary / notes tab ---------------- */
 function GeneratedTextTab({ subject, kind, title }) {
-  const [content, setContent] = useState("");
+  const [materials, setMaterials] = useState([]);
+  const [parts, setParts] = useState({});
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
   const [reviewedAt, setReviewedAt] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      const raw = await sGet(`${kind}:${subject.id}`, true);
-      setContent(raw || "");
-      const p = await getProgress(subject.id);
-      setReviewedAt(kind === "summary" ? p.summaryReviewed : p.notesReviewed);
-      setLoading(false);
-    })();
+  const load = useCallback(async () => {
+    setLoading(true);
+    const mRaw = await sGet(`materials:${subject.id}`, true);
+    const mList = safeJSON(mRaw, []);
+    const pRaw = await sGet(`${kind}Parts:${subject.id}`, true);
+    const p = safeJSON(pRaw, {});
+    setMaterials(mList);
+    setParts(p);
+    const prog = await getProgress(subject.id);
+    setReviewedAt(kind === "summary" ? prog.summaryReviewed : prog.notesReviewed);
+    setLoading(false);
   }, [subject.id, kind]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const content = materials.filter((m) => parts[m.id]).map((m) => parts[m.id]).join("\n\n");
+  const missingMaterials = materials.filter((m) => !parts[m.id]);
+  const buttonLabel = missingMaterials.length && content ? `Add ${missingMaterials.length} missing` : content ? `Regenerate ${title}` : `Generate ${title}`;
 
   const generate = async () => {
     setGenerating(true);
     setError("");
     try {
-      const ctx = await getMaterialsContext(subject.id);
-      if (!ctx) { setError("Add material first — there's nothing to build from yet."); setGenerating(false); return; }
+      if (materials.length === 0) { setError("Add material first — there's nothing to build from yet."); setGenerating(false); return; }
+      const targets = missingMaterials.length ? missingMaterials : materials;
       const prompt = kind === "summary"
         ? "Write a clear, well-organized summary of this material for a student reviewing before a test. Use short headed sections and concise bullet points. Plain text only, no markdown symbols."
         : "Turn this material into clean, well-structured study notes — organized by topic with clear headers and bullet points a student can scan quickly. Plain text only, no markdown symbols.";
-      const out = await callClaude({
-        system: "You write study content using ONLY the teacher-provided material given to you. Never add outside facts. If the material is incomplete on a point, note that rather than inventing detail.",
-        messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\n${prompt}` }],
-        maxTokens: 1000,
-      });
-      setContent(out.trim());
-      await sSet(`${kind}:${subject.id}`, out.trim(), true);
+      const updatedParts = { ...parts };
+      for (const m of targets) {
+        const out = await callClaude({
+          system: "You write study content using ONLY the teacher-provided material given to you. Never add outside facts. If the material is incomplete on a point, note that rather than inventing detail.",
+          messages: [{ role: "user", content: `TEACHER MATERIAL — "${m.name}":\n${m.text.slice(0, 9000)}\n\n${prompt}` }],
+          maxTokens: 1000,
+        });
+        updatedParts[m.id] = out.trim();
+      }
+      setParts(updatedParts);
+      await sSet(`${kind}Parts:${subject.id}`, JSON.stringify(updatedParts), true);
     } catch (e) {
       setError("Something went wrong generating that. Try again.");
     } finally {
@@ -1062,8 +1107,8 @@ function GeneratedTextTab({ subject, kind, title }) {
               ? <span className="mastery-chip done"><Check size={12} /> Reviewed {new Date(reviewedAt).toLocaleDateString()}</span>
               : <button className="btn-ghost" onClick={handleMarkReviewed}><Check size={13} /> Mark as reviewed</button>
           )}
-          <button className="btn-secondary" disabled={generating} onClick={generate}>
-            {generating ? <><Loader2 size={14} className="spin" /> Generating…</> : <><Sparkles size={14} /> {content ? `Regenerate ${title}` : `Generate ${title}`}</>}
+          <button className="btn-secondary" disabled={generating || materials.length === 0} onClick={generate}>
+            {generating ? <><Loader2 size={14} className="spin" /> Generating…</> : <><Sparkles size={14} /> {buttonLabel}</>}
           </button>
         </div>
       </div>
@@ -1121,13 +1166,13 @@ function FlashcardsTab({ subject }) {
       if (!ctx) { setError("Add material first — there's nothing to build from yet."); setGenerating(false); return; }
       const existing = cards.map((c) => c.front).join(" | ");
       const out = await callClaude({
-        system: "You create flashcards using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences, no commentary. Format: [{\"front\":\"...\",\"back\":\"...\",\"topic\":\"...\"}]. \"topic\" is a short 2-4 word unit/topic name from within the material (e.g. \"Cell Respiration\", \"Linear Equations\") — use the same exact topic name for cards on the same unit so they can be grouped.",
-        messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\nCreate 6 new flashcards covering different parts of this material, at this difficulty: ${DIFF_PROMPTS[diff]} Avoid repeating these existing fronts: ${existing || "none"}. Front = concise question or term. Back = concise answer/definition. Tag each with the specific topic/unit it belongs to.` }],
+        system: "You create flashcards using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences, no commentary. Format: [{\"front\":\"...\",\"back\":\"...\",\"topic\":\"...\",\"materialId\":\"...\"}]. \"topic\" is a short 2-4 word unit/topic name from within the material (e.g. \"Cell Respiration\", \"Linear Equations\") — use the same exact topic name for cards on the same unit so they can be grouped. \"materialId\" MUST be copied exactly from the [material:ID] tag in the source block this card is primarily drawn from.",
+        messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\nCreate 6 new flashcards covering different parts of this material, at this difficulty: ${DIFF_PROMPTS[diff]} Avoid repeating these existing fronts: ${existing || "none"}. Front = concise question or term. Back = concise answer/definition. Tag each with the specific topic/unit it belongs to, and the materialId it came from.` }],
         maxTokens: 1000,
       });
       const parsed = safeJSON(stripFence(out), []);
       if (!Array.isArray(parsed) || !parsed.length) throw new Error("empty");
-      const withIds = parsed.map((c, i) => ({ id: "fc_" + Date.now() + "_" + i, front: c.front, back: c.back, topic: c.topic || "General" }));
+      const withIds = parsed.map((c, i) => ({ id: "fc_" + Date.now() + "_" + i, front: c.front, back: c.back, topic: c.topic || "General", materialId: c.materialId || null }));
       const updated = { ...byDiff, [diff]: [...cards, ...withIds] };
       setByDiff(updated);
       await sSet(`flashcards:${subject.id}:${diff}`, JSON.stringify(updated[diff]), true);
@@ -1273,13 +1318,13 @@ function PracticeTab({ subject }) {
       }
       knownTopics = [...new Set(knownTopics)];
       const out = await callClaude({
-        system: "You write practice questions using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences. Format: [{\"type\":\"mcq\",\"question\":\"...\",\"options\":[\"a\",\"b\",\"c\",\"d\"],\"correctIndex\":0,\"explanation\":\"...\",\"topic\":\"...\"}, {\"type\":\"short\",\"question\":\"...\",\"sampleAnswer\":\"...\",\"rubric\":\"...\",\"topic\":\"...\"}]. \"topic\" is a short 2-4 word unit/topic name from within the material (e.g. \"Cell Respiration\").",
-        messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\nWrite 4 practice questions (mix of \"mcq\" and \"short\" types) at this difficulty: ${DIFF_PROMPTS[diff]}. Tag each with the specific topic/unit it belongs to.${knownTopics.length ? ` Reuse these exact topic names where they fit: ${knownTopics.join(", ")}.` : ""}` }],
+        system: "You write practice questions using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences. Format: [{\"type\":\"mcq\",\"question\":\"...\",\"options\":[\"a\",\"b\",\"c\",\"d\"],\"correctIndex\":0,\"explanation\":\"...\",\"topic\":\"...\",\"materialId\":\"...\"}, {\"type\":\"short\",\"question\":\"...\",\"sampleAnswer\":\"...\",\"rubric\":\"...\",\"topic\":\"...\",\"materialId\":\"...\"}]. \"topic\" is a short 2-4 word unit/topic name from within the material (e.g. \"Cell Respiration\"). \"materialId\" MUST be copied exactly from the [material:ID] tag in the source block this question is primarily drawn from.",
+        messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\nWrite 4 practice questions (mix of \"mcq\" and \"short\" types) at this difficulty: ${DIFF_PROMPTS[diff]}. Tag each with the specific topic/unit it belongs to, and the materialId it came from.${knownTopics.length ? ` Reuse these exact topic names where they fit: ${knownTopics.join(", ")}.` : ""}` }],
         maxTokens: 1000,
       });
       const parsed = safeJSON(stripFence(out), []);
       if (!Array.isArray(parsed) || !parsed.length) throw new Error("empty");
-      const withIds = parsed.map((q, i) => ({ id: "q_" + Date.now() + "_" + i, ...q, topic: q.topic || "General" }));
+      const withIds = parsed.map((q, i) => ({ id: "q_" + Date.now() + "_" + i, ...q, topic: q.topic || "General", materialId: q.materialId || null }));
       const updated = { ...byDiff, [diff]: [...(byDiff[diff] || []), ...withIds] };
       setByDiff(updated);
       await sSet(`practice:${subject.id}:${diff}`, JSON.stringify(updated[diff]), true);
@@ -1537,13 +1582,13 @@ function FocusTab({ subject }) {
       const ctx = await getMaterialsContext(subject.id);
       if (!ctx) { setError("Add material first."); setGenerating(false); return; }
       const out = await callClaude({
-        system: "You create flashcards using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences. Format: [{\"front\":\"...\",\"back\":\"...\",\"topic\":\"...\"}].",
+        system: "You create flashcards using ONLY the given teacher material. Respond with ONLY valid JSON, no markdown fences. Format: [{\"front\":\"...\",\"back\":\"...\",\"topic\":\"...\",\"materialId\":\"...\"}]. \"materialId\" MUST be copied exactly from the [material:ID] tag in the source block this card is primarily drawn from.",
         messages: [{ role: "user", content: `TEACHER MATERIAL:\n${ctx}\n\nCreate 6 flashcards focused specifically on these weak topics: ${weakTopics.join(", ")}. Reuse these exact topic names.` }],
         maxTokens: 1000,
       });
       const parsed = safeJSON(stripFence(out), []);
       if (!Array.isArray(parsed) || !parsed.length) throw new Error("empty");
-      const withIds = parsed.map((c, i) => ({ id: "fc_" + Date.now() + "_" + i, front: c.front, back: c.back, topic: c.topic || weakTopics[0], difficulty: "standard" }));
+      const withIds = parsed.map((c, i) => ({ id: "fc_" + Date.now() + "_" + i, front: c.front, back: c.back, topic: c.topic || weakTopics[0], materialId: c.materialId || null, difficulty: "standard" }));
       const updated = [...cards, ...withIds];
       const standardTierCards = updated.filter((c) => c.difficulty === "standard");
       await sSet(`flashcards:${subject.id}:standard`, JSON.stringify(standardTierCards), true);
@@ -1718,7 +1763,7 @@ function PracticeTestTab({ subject }) {
       const usedRaw = await sGet(`usedTestQuestions:${subject.id}`, false);
       const used = safeJSON(usedRaw, []).slice(0, 40);
 
-      const batchSchema = "Respond with ONLY valid JSON, no markdown fences. Format: [{\"type\":\"mcq\",\"question\":\"...\",\"options\":[\"a\",\"b\",\"c\",\"d\"],\"correctIndex\":0,\"explanation\":\"...\",\"topic\":\"...\",\"difficulty\":\"foundational|standard|challenge|stateLevel\"}, {\"type\":\"short\",\"question\":\"...\",\"sampleAnswer\":\"...\",\"rubric\":\"...\",\"topic\":\"...\",\"difficulty\":\"foundational|standard|challenge|stateLevel\"}]";
+      const batchSchema = "Respond with ONLY valid JSON, no markdown fences. Format: [{\"type\":\"mcq\",\"question\":\"...\",\"options\":[\"a\",\"b\",\"c\",\"d\"],\"correctIndex\":0,\"explanation\":\"...\",\"topic\":\"...\",\"difficulty\":\"foundational|standard|challenge|stateLevel\",\"materialId\":\"...\"}, {\"type\":\"short\",\"question\":\"...\",\"sampleAnswer\":\"...\",\"rubric\":\"...\",\"topic\":\"...\",\"difficulty\":\"foundational|standard|challenge|stateLevel\",\"materialId\":\"...\"}]. \"materialId\" MUST be copied exactly from the [material:ID] tag in the source block each question is primarily drawn from.";
 
       const batch1 = await callClaude({
         system: `You write full-length test questions using ONLY the given teacher material. ${batchSchema}`,
