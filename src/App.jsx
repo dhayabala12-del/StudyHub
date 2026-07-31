@@ -224,7 +224,18 @@ async function callClaude({ system, messages, maxTokens = 1000 }) {
       messages,
     }),
   });
-  const data = await res.json();
+
+  const raw = await res.text();
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    if (res.status === 413) {
+      throw new Error("PAYLOAD_TOO_LARGE: File is too large for the server to process.");
+    }
+    throw new Error(`Server returned an unexpected response (status ${res.status}).`);
+  }
+
   if (!res.ok) {
     console.error("Claude proxy error:", data?.error);
     throw new Error(data?.error || "AI request failed");
@@ -887,9 +898,19 @@ function AddMaterialModal({ onClose, onAdd }) {
     await onAdd({ id: "mat_" + Date.now(), name: name.trim(), sourceType: "text", text: text.trim(), addedAt: Date.now() });
   };
 
+  const MAX_FILE_BYTES = 3 * 1024 * 1024; // 3MB — stays under Vercel's 4.5MB request limit after base64 encoding
+
   const submitFile = async () => {
     const file = fileRef.current?.files?.[0];
     if (!file) return;
+
+    if (file.size > MAX_FILE_BYTES) {
+      setError(
+        `This file is ${(file.size / (1024 * 1024)).toFixed(1)}MB — please use a file under 3MB. Try compressing the PDF, splitting it into smaller sections, or exporting fewer pages at a time.`
+      );
+      return;
+    }
+
     setBusy(true);
     setError("");
     try {
@@ -921,7 +942,15 @@ function AddMaterialModal({ onClose, onAdd }) {
         addedAt: Date.now(),
       });
     } catch (e) {
-      setError("Couldn't read that file. Try a clearer photo or paste the text instead.");
+      console.error("File upload failed:", e);
+      const msg = e?.message || "";
+      if (msg.includes("PAYLOAD_TOO_LARGE") || msg.includes("too large") || msg.includes("Unexpected token")) {
+        setError("This file is too large for the server to process. Try a smaller file (under 3MB) or fewer pages.");
+      } else if (msg) {
+        setError(`Couldn't read that file: ${msg}`);
+      } else {
+        setError("Couldn't read that file. Try a clearer photo or paste the text instead.");
+      }
     } finally {
       setBusy(false);
     }
