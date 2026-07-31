@@ -1,5 +1,25 @@
 // This runs on Vercel's server, never in the student's browser.
-// The API key stays private here via process.env.ANTHROPIC_API_KEY.
+// Uses Google's Gemini API (free tier) — the key stays private via
+// process.env.GEMINI_API_KEY. Accepts the same { system, messages, maxTokens }
+// shape the frontend already sends, and replies in the same
+// { content: [{ type: "text", text }] } shape it already expects — so no
+// frontend code needs to change.
+
+function toGeminiParts(content) {
+  if (typeof content === "string") return [{ text: content }];
+  return (content || []).map((block) => {
+    if (block.type === "text") return { text: block.text };
+    if (block.type === "image" || block.type === "document") {
+      return {
+        inline_data: {
+          mime_type: block.source?.media_type,
+          data: block.source?.data,
+        },
+      };
+    }
+    return { text: "" };
+  });
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -7,9 +27,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: "Server is missing ANTHROPIC_API_KEY" });
+    res.status(500).json({ error: "Server is missing GEMINI_API_KEY" });
     return;
   }
 
@@ -21,20 +41,25 @@ export default async function handler(req, res) {
       return;
     }
 
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-5",
-        max_tokens: Math.min(Number(maxTokens) || 1000, 4000),
-        system,
-        messages,
-      }),
-    });
+    const contents = messages.map((m) => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: toGeminiParts(m.content),
+    }));
+
+    const body = {
+      contents,
+      generationConfig: { maxOutputTokens: Math.min(Number(maxTokens) || 1000, 4000) },
+    };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
+
+    const upstream = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    );
 
     const data = await upstream.json();
 
@@ -43,9 +68,13 @@ export default async function handler(req, res) {
       return;
     }
 
-    res.status(200).json(data);
+    const text = (data?.candidates?.[0]?.content?.parts || [])
+      .map((p) => p.text || "")
+      .join("");
+
+    res.status(200).json({ content: [{ type: "text", text }] });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Something went wrong contacting Claude" });
+    res.status(500).json({ error: "Something went wrong contacting the AI" });
   }
 }
